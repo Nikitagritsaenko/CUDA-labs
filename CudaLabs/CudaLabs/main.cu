@@ -69,7 +69,47 @@ __global__ void matrixMul(double* A, double* B, double* C, size_t n)
 	}
 }
 
-float gpuMatrixMultiplication(double* A, double* B, double* C, size_t n)
+__global__ void matrixMulShared(double* A, double* B, double* C, size_t n)
+{
+	size_t row = blockDim.y * blockIdx.y + threadIdx.y;
+	size_t column = blockDim.x * blockIdx.x + threadIdx.x;
+
+	double cellValue = 0;
+
+	__shared__ double sA[BLOCK_SIZE][BLOCK_SIZE];
+	__shared__ double sB[BLOCK_SIZE][BLOCK_SIZE];
+
+	for (size_t k = 0; k * BLOCK_SIZE < n; k++) {
+
+		if (row < n && k * BLOCK_SIZE + threadIdx.x < n) {
+			sA[threadIdx.y][threadIdx.x] = A[row * n + k * BLOCK_SIZE + threadIdx.x];
+		}
+		else {
+			sA[threadIdx.y][threadIdx.x] = 0;
+		}
+
+		if (column < n && k * BLOCK_SIZE + threadIdx.y < n) {
+			sB[threadIdx.y][threadIdx.x] = B[(k * BLOCK_SIZE + threadIdx.y) * n + column];
+		}
+		else {
+			sB[threadIdx.y][threadIdx.x] = 0;
+		}
+
+		__syncthreads();
+
+		for (size_t i = 0; i < BLOCK_SIZE; i++) {
+			cellValue += sA[threadIdx.y][i] * sB[i][threadIdx.x];
+		}
+
+		__syncthreads();
+	}
+
+	if (row < n && column < n) {
+		C[row * n + column] = cellValue;
+	}
+}
+
+float gpuMatrixMultiplication(double* A, double* B, double* C, size_t n, bool isSharedMemory)
 {
 	double* dA;
 	double* dB;
@@ -95,7 +135,12 @@ float gpuMatrixMultiplication(double* A, double* B, double* C, size_t n)
 
 	cudaEventRecord(start, 0);
 
-	matrixMul << <grid, threads >> > (dA, dB, dC, n);
+	if (isSharedMemory) {
+		matrixMulShared << <grid, threads >> > (dA, dB, dC, n);
+	}
+	else {
+		matrixMul << <grid, threads >> > (dA, dB, dC, n);
+	}
 
 	cudaEventRecord(end, 0);
 	cudaEventSynchronize(end);
@@ -111,6 +156,16 @@ float gpuMatrixMultiplication(double* A, double* B, double* C, size_t n)
 	cudaFree(dC);
 
 	return time / 1000.0f;
+}
+
+float gpuMatrixMultiplicationWithoutSharedMemory(double* A, double* B, double* C, size_t n)
+{
+	return gpuMatrixMultiplication(A, B, C, n, false);
+}
+
+float gpuMatrixMultiplicationWithSharedMemory(double* A, double* B, double* C, size_t n)
+{
+	return gpuMatrixMultiplication(A, B, C, n, true);
 }
 
 double getMaximumDeviation(double* A, double* B, size_t n)
@@ -132,26 +187,35 @@ int main()
 	double* mA = generateRandomMatrix(n);
 	double* mB = generateRandomMatrix(n);
 
+	// CPU
 	double* resultCPU = new double[n * n];
 	std::fill_n(resultCPU, n * n, 0);
-
 	float cpuTime = cpuMatrixMultiplication(mA, mB, resultCPU, n);
-	
+
+	// GPU (without shared memory)
 	double* resultGPU = new double[n * n];
 	std::fill_n(resultGPU, n * n, 0);
+	float gpuTime = gpuMatrixMultiplicationWithoutSharedMemory(mA, mB, resultGPU, n);
+	double maxDeviationWithoutSharedMemory = getMaximumDeviation(resultCPU, resultGPU, n);
 
-	float gpuTime = gpuMatrixMultiplication(mA, mB, resultGPU, n);
+	// GPU (with shared memory)
+	double* resultGPUWithSharedMemory = new double[n * n];
+	std::fill_n(resultGPUWithSharedMemory, n * n, 0);
+	float gpuTimeWithSharedMemory = gpuMatrixMultiplicationWithSharedMemory(mA, mB, resultGPUWithSharedMemory, n);
+	double maxDeviationWithSharedMemory = getMaximumDeviation(resultCPU, resultGPUWithSharedMemory, n);
 
-	double maxDeviation = getMaximumDeviation(resultCPU, resultGPU, n);
-
+	// Results
 	std::cout << "CPU time = " << cpuTime << std::endl;
-	std::cout << "GPU time = " << gpuTime << std::endl;
-	std::cout << "Maximum deviation = " << maxDeviation << std::endl;
+	std::cout << "GPU time (without shared memory) = " << gpuTime << std::endl;
+	std::cout << "GPU time (with shared memory) = " << gpuTimeWithSharedMemory << std::endl;
+	std::cout << "Maximum deviation (without shared memory) = " << maxDeviationWithoutSharedMemory << std::endl;
+	std::cout << "Maximum deviation (with shared memory) = " << maxDeviationWithSharedMemory << std::endl;
 
 	delete[] mA;
 	delete[] mB;
 	delete[] resultCPU;
 	delete[] resultGPU;
+	delete[] resultGPUWithSharedMemory;
 
 	return 0;
 }
